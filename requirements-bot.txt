@@ -1,0 +1,6 @@
+# Optional dependencies for Telegram bot + GPT summary
+# Install only if you want to run:
+#   python -m src.main bot
+python-telegram-bot==21.10
+openai>=1.0.0
+

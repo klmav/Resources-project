@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.python-version
+.venv/
+venv/
+*.log
+
+# Office temp/lock files
+~$*.xlsx
+
+# Local secrets / env
+.env
+secrets/
+

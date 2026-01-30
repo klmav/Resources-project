@@ -14,6 +14,7 @@ class Severity(StrEnum):
 @dataclass(frozen=True)
 class IssueLocation:
     person: Optional[str] = None
+    pm: Optional[str] = None
     week: Optional[str] = None
     cell: Optional[str] = None
 

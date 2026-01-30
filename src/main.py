@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 from typing import Iterable
 
 from .config import get_settings
@@ -10,16 +9,7 @@ from .models import Issue, Severity
 from .notifications.telegram import TelegramNotifier
 from .services.audit import AuditService
 from .local.xlsx_reader import XlsxParseHints, read_xlsx_as_sheet_values
-from .checks.base import run_checks
-from .checks.resource_plan_xlsx import (
-    HeaderHasMonthsCheck,
-    WorkdaysRowNumericCheck,
-    AllocationNotExceedWorkdaysCheck,
-    RoleCodeValidCheck,
-    InFlagConsistencyCheck,
-    IfHasHoursThenKeyFieldsFilledCheck,
-    MonthCellsNumericAndNonNegativeCheck,
-)
+from .services.audit_xlsx import run_xlsx_audit
 
 
 def _configure_stdout() -> None:
@@ -33,7 +23,7 @@ def _configure_stdout() -> None:
         pass
 
 
-def format_issues_text(issues: Iterable[Issue]) -> str:
+def format_issues_text(issues: Iterable[Issue], *, limit: int = 60, full: bool = False) -> str:
     lines: list[str] = []
     issues = list(issues)
 
@@ -47,10 +37,50 @@ def format_issues_text(issues: Iterable[Issue]) -> str:
     lines.append(f"Найдено проблем: {len(issues)} (red={len(red)}, yellow={len(yellow)}, info={len(info)})")
     lines.append("")
 
+    # quick counts by code
+    by_code: dict[str, int] = {}
     for i in issues:
+        by_code[i.code] = by_code.get(i.code, 0) + 1
+    top_codes = sorted(by_code.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    lines.append("Топ проблем по типу:")
+    for code, cnt in top_codes:
+        lines.append(f"- {code}: {cnt}")
+
+    # high-signal breakdown for MONTH_CELL_EMPTY
+    if by_code.get("MONTH_CELL_EMPTY"):
+        by_pm: dict[str, int] = {}
+        for i in issues:
+            if i.code != "MONTH_CELL_EMPTY":
+                continue
+            pm = i.location.pm or "PM не указан"
+            by_pm[pm] = by_pm.get(pm, 0) + 1
+        lines.append("")
+        lines.append("Пустые месяцы (MONTH_CELL_EMPTY) по PM:")
+        for pm, cnt in sorted(by_pm.items(), key=lambda kv: (-kv[1], kv[0]))[:10]:
+            lines.append(f"- {pm}: {cnt}")
+
+    lines.append("")
+
+    # Avoid spamming: in non-full mode, show all non-empty-month issues and only a slice of empty-month issues.
+    if full:
+        display = issues
+    else:
+        non_empty = [i for i in issues if i.code != "MONTH_CELL_EMPTY"]
+        empty = [i for i in issues if i.code == "MONTH_CELL_EMPTY"]
+        remaining = max(0, limit - len(non_empty))
+        display = non_empty + empty[:remaining]
+
+    shown = 0
+    for i in display:
+        if not full and shown >= limit:
+            break
+        shown += 1
         loc = []
         if i.location.person:
             loc.append(f"person={i.location.person}")
+        if getattr(i.location, "pm", None):
+            if i.location.pm:
+                loc.append(f"pm={i.location.pm}")
         if i.location.week:
             loc.append(f"week={i.location.week}")
         if i.location.cell:
@@ -60,6 +90,11 @@ def format_issues_text(issues: Iterable[Issue]) -> str:
         lines.append(f"- [{i.severity}] {i.code}{loc_text}: {i.message}")
         if i.suggestion:
             lines.append(f"  suggestion: {i.suggestion}")
+
+    if not full and len(issues) > shown:
+        lines.append("")
+        lines.append(f"… и ещё {len(issues) - shown} проблем(ы).")
+        lines.append("Подсказка: увеличь --limit или используй --full (может быть очень длинно).")
 
     return "\n".join(lines)
 
@@ -84,42 +119,17 @@ def cmd_bot(_: argparse.Namespace) -> int:
 
 
 def cmd_audit_xlsx(args: argparse.Namespace) -> int:
-    path = Path(args.path)
-    if not path.exists():
-        # Convenience for Windows console encoding issues: allow "--path auto"
-        # or any non-existing path and fallback to first .xlsx in cwd.
-        candidates = sorted(Path(".").glob("*.xlsx"))
-        if not candidates:
-            raise FileNotFoundError(f"XLSX not found: {args.path}")
-        path = candidates[0]
-
-    data = read_xlsx_as_sheet_values(
-        path=path,
-        sheet_name=args.sheet,
-        hints=None
-        if args.header_row is None and args.max_cols is None
-        else XlsxParseHints(
-            header_row=args.header_row,
-            max_cols=args.max_cols,
-        ),
+    report = run_xlsx_audit(
+        settings=get_settings(),
+        path=args.path,
+        sheet=args.sheet,
+        header_row=args.header_row,
+        max_cols=args.max_cols,
     )
 
-    issues = run_checks(
-        checks=[
-            HeaderHasMonthsCheck(),
-            WorkdaysRowNumericCheck(),
-            MonthCellsNumericAndNonNegativeCheck(),
-            AllocationNotExceedWorkdaysCheck(),
-            RoleCodeValidCheck(),
-            InFlagConsistencyCheck(),
-            IfHasHoursThenKeyFieldsFilledCheck(),
-        ],
-        data=data,
-    )
-
-    text = format_issues_text(issues)
+    text = format_issues_text(report.issues, limit=args.limit, full=args.full)
     print(text)
-    return 0 if not issues else 2
+    return 0 if report.is_ok() else 2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -137,6 +147,8 @@ def build_parser() -> argparse.ArgumentParser:
     audit_xlsx.add_argument("--sheet", required=False, help="Sheet name (default: first sheet)")
     audit_xlsx.add_argument("--header-row", required=False, type=int, help="Header row (1-based) override")
     audit_xlsx.add_argument("--max-cols", required=False, type=int, help="Max columns to read override")
+    audit_xlsx.add_argument("--limit", required=False, type=int, default=60, help="How many issues to print")
+    audit_xlsx.add_argument("--full", action="store_true", help="Print all issues (can be very long)")
     audit_xlsx.set_defaults(func=cmd_audit_xlsx)
 
     return p

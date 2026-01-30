@@ -14,6 +14,8 @@
 
 - `src/` — код приложения (каркас модулей)
 - `docs/` — продуктовые/технические документы (`product.md`, `tech.md`)
+- `docs/testing_strategy.md` — стратегия тестирования
+- `docs/test_cases.md` — тест-кейсы
 - `env.example` — пример переменных окружения (переименуй в `.env` для запуска)
 - `requirements.txt` — зависимости Python
 
@@ -55,13 +57,45 @@ python -m src.main audit-xlsx --path auto
 
 `--path auto` возьмет **первый .xlsx** файл в папке проекта (удобно на Windows, если имя файла с кириллицей).
 
+Полезные флаги:
+- `--limit 80` — сколько проблем печатать (остальное останется в “… и ещё N”)
+- `--full` — печатать всё (может быть очень длинно)
+
+Отчет включает сводку:
+- топ проблем по типу
+- топ PM по количеству “пустых месяцев” (MONTH_CELL_EMPTY)
+
+---
+
+## Тесты
+
+Автотесты (pytest) находятся в `tests/`.
+
+Установка:
+
+```bash
+python -m pip install -r requirements-test.txt
+```
+
+Запуск:
+
+```bash
+pytest -q
+```
+
 4) Запусти Telegram-бота (polling):
 
 ```bash
 python -m src.main bot
 ```
 
-Примечание: для команды `bot` нужны дополнительные зависимости (`python-telegram-bot`).
+Примечание: для команды `bot` нужны дополнительные зависимости.
+Установи:
+
+```bash
+python -m pip install -r requirements-bot.txt
+```
+
 Для `audit-xlsx` они **не нужны**.
 
 ---

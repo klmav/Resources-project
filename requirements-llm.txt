@@ -1,0 +1,5 @@
+# Optional dependencies for LLM (OpenAI)
+# Install only if you want GPT-5 summaries/chat:
+#   python -m pip install -r requirements-llm.txt
+openai>=1.0.0
+

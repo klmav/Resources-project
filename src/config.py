@@ -21,6 +21,14 @@ class Settings:
     # Audit behavior
     stale_days: int = 3
 
+    # Local XLSX mode (for bot / local runs)
+    local_xlsx_path: str = "auto"
+    local_xlsx_sheet: str = ""
+
+    # OpenAI / GPT-5 (optional)
+    openai_api_key: str = ""
+    openai_model: str = "gpt-5"
+
 
 def _load_dotenv_if_available() -> None:
     """
@@ -57,5 +65,9 @@ def get_settings() -> Settings:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         stale_days=_get_int("STALE_DAYS", 3),
+        local_xlsx_path=os.getenv("LOCAL_XLSX_PATH", "auto"),
+        local_xlsx_sheet=os.getenv("LOCAL_XLSX_SHEET", ""),
+        openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+        openai_model=os.getenv("OPENAI_MODEL", "gpt-5"),
     )
 
