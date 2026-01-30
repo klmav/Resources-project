@@ -24,6 +24,7 @@ class Settings:
     # Local XLSX mode (for bot / local runs)
     local_xlsx_path: str = "auto"
     local_xlsx_sheet: str = ""
+    local_xlsx_output_dir: str = "out"
 
     # OpenAI / GPT-5 (optional)
     openai_api_key: str = ""
@@ -67,6 +68,7 @@ def get_settings() -> Settings:
         stale_days=_get_int("STALE_DAYS", 3),
         local_xlsx_path=os.getenv("LOCAL_XLSX_PATH", "auto"),
         local_xlsx_sheet=os.getenv("LOCAL_XLSX_SHEET", ""),
+        local_xlsx_output_dir=os.getenv("LOCAL_XLSX_OUTPUT_DIR", "out"),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5"),
     )
