@@ -18,8 +18,11 @@ class CellRef:
 class CellUpdate:
     sheet_name: str
     cell: CellRef
-    new_value: float | int | str
+    kind: str  # "set_value" | "highlight"
     reason: str
+    new_value: float | int | str | None = None
+    fill_rgb: Optional[str] = None
+    month_label: Optional[str] = None  # e.g. "01.26"
     pm: Optional[str] = None
     person: Optional[str] = None
 
@@ -33,4 +36,3 @@ class FixPlan:
     sheet_name: str
     description: str
     updates: list[CellUpdate]
-

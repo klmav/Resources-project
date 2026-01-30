@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
 
@@ -21,6 +22,7 @@ from ..main import format_issues_text
 from ..models import Issue
 from ..services.audit_xlsx import run_xlsx_audit
 from ..fixes.month_empty_to_zero import plan_fill_empty_months_with_zero
+from ..fixes.highlight_missing_fields import plan_highlight_missing_pm_and_employee
 from ..fixes.xlsx_apply import apply_fix_plan_to_xlsx_copy
 from ..local.xlsx_reader import read_xlsx_as_sheet_values
 
@@ -53,7 +55,9 @@ def build_application(settings: Settings) -> Application:
             return
 
         chunk_size = 3500
-        parts = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)] or [text]
+        parts = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)] or [
+            text
+        ]
         for idx, part in enumerate(parts):
             await msg.reply_text(part, reply_markup=reply_markup if idx == 0 else None)
 
@@ -92,8 +96,12 @@ def build_application(settings: Settings) -> Application:
             },
             "counts": {
                 "total": len(issues),
-                "by_code": dict(sorted(by_code.items(), key=lambda kv: (-kv[1], kv[0]))),
-                "empty_by_pm_top": dict(sorted(by_pm.items(), key=lambda kv: (-kv[1], kv[0]))[:15]),
+                "by_code": dict(
+                    sorted(by_code.items(), key=lambda kv: (-kv[1], kv[0]))
+                ),
+                "empty_by_pm_top": dict(
+                    sorted(by_pm.items(), key=lambda kv: (-kv[1], kv[0]))[:15]
+                ),
             },
             "sample_issues": sample,
         }
@@ -135,7 +143,9 @@ def build_application(settings: Settings) -> Application:
     ) -> None:
         context.application.bot_data[_pm_storage_key(chat_id)] = pms
 
-    def _get_pm_list_for_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> List[str]:
+    def _get_pm_list_for_chat(
+        context: ContextTypes.DEFAULT_TYPE, chat_id: int
+    ) -> List[str]:
         val = context.application.bot_data.get(_pm_storage_key(chat_id))
         return val if isinstance(val, list) else []
 
@@ -146,23 +156,61 @@ def build_application(settings: Settings) -> Application:
     ) -> None:
         context.application.bot_data[_audit_ctx_key(chat_id)] = audit_ctx
 
-    def _get_audit_context(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Optional[dict[str, Any]]:
+    def _get_audit_context(
+        context: ContextTypes.DEFAULT_TYPE, chat_id: int
+    ) -> Optional[dict[str, Any]]:
         val = context.application.bot_data.get(_audit_ctx_key(chat_id))
         return val if isinstance(val, dict) else None
 
-    def _store_issues(context: ContextTypes.DEFAULT_TYPE, chat_id: int, issues: List[Issue]) -> None:
+    def _store_issues(
+        context: ContextTypes.DEFAULT_TYPE, chat_id: int, issues: List[Issue]
+    ) -> None:
         context.application.bot_data[_issues_key(chat_id)] = issues
 
     def _get_issues(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> List[Issue]:
         val = context.application.bot_data.get(_issues_key(chat_id))
         return val if isinstance(val, list) else []
 
-    def _store_fixplan(context: ContextTypes.DEFAULT_TYPE, chat_id: int, plan: dict[str, Any]) -> None:
+    def _store_fixplan(
+        context: ContextTypes.DEFAULT_TYPE, chat_id: int, plan: dict[str, Any]
+    ) -> None:
         context.application.bot_data[_fixplan_key(chat_id)] = plan
 
-    def _get_fixplan(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Optional[dict[str, Any]]:
+    def _get_fixplan(
+        context: ContextTypes.DEFAULT_TYPE, chat_id: int
+    ) -> Optional[dict[str, Any]]:
         val = context.application.bot_data.get(_fixplan_key(chat_id))
         return val if isinstance(val, dict) else None
+
+    def _col_to_letters(col: int) -> str:
+        # 1-based col
+        out = ""
+        n = col
+        while n > 0:
+            n, r = divmod(n - 1, 26)
+            out = chr(65 + r) + out
+        return out
+
+    def _cell_a1(row: int, col: int) -> str:
+        return f"{_col_to_letters(col)}{row}"
+
+    def _timestamp_slug(now: dt.datetime | None = None) -> str:
+        now = now or dt.datetime.now()
+        return now.strftime("%Y%m%d_%H%M%S")
+
+    def _preview_examples(updates: List[Any], *, limit: int = 10) -> str:
+        lines: list[str] = []
+        for u in updates[:limit]:
+            a1 = _cell_a1(u.cell.row, u.cell.col)
+            pm = u.pm or "PM не указан"
+            person = u.person or "сотрудник не указан"
+            month = getattr(u, "month_label", None) or ""
+            month_txt = f", {month}" if month else ""
+            if u.kind == "set_value":
+                lines.append(f"- {a1}{month_txt}: {person} / {pm} → 0")
+            elif u.kind == "highlight":
+                lines.append(f"- {a1}: подсветить ({u.reason}) {person} / {pm}")
+        return "\n".join(lines)
 
     def _pm_keyboard(
         context: ContextTypes.DEFAULT_TYPE,
@@ -174,7 +222,9 @@ def build_application(settings: Settings) -> Application:
         _store_pm_list_for_chat(context, chat_id, pms)
 
         buttons: List[List[InlineKeyboardButton]] = []
-        buttons.append([InlineKeyboardButton("Все PM", callback_data=f"{action}pm:all")])
+        buttons.append(
+            [InlineKeyboardButton("Все PM", callback_data=f"{action}pm:all")]
+        )
 
         max_items = 20
         shown = pms[:max_items]
@@ -188,7 +238,13 @@ def build_application(settings: Settings) -> Application:
             buttons.append(row)
 
         if len(pms) > max_items:
-            buttons.append([InlineKeyboardButton(f"…ещё {len(pms) - max_items}", callback_data="noop")])
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        f"…ещё {len(pms) - max_items}", callback_data="noop"
+                    )
+                ]
+            )
 
         return InlineKeyboardMarkup(buttons)
 
@@ -231,7 +287,9 @@ def build_application(settings: Settings) -> Application:
             await _send_long(update, "Выбери PM для /audit:", reply_markup=kb)
             return
 
-        filtered = _filter_issues_by_pm(all_issues, pm_query) if pm_query else all_issues
+        filtered = (
+            _filter_issues_by_pm(all_issues, pm_query) if pm_query else all_issues
+        )
 
         if pm_query and not filtered:
             pms = _extract_pm_list(all_issues)
@@ -247,11 +305,15 @@ def build_application(settings: Settings) -> Application:
             _store_audit_context(context, msg.chat.id, _build_llm_context(filtered))
 
         title = f"Аудит (PM: {pm_query})" if pm_query else "Аудит (все PM)"
-        await _send_long(update, title + "\n\n" + format_issues_text(filtered, limit=80, full=False))
+        await _send_long(
+            update, title + "\n\n" + format_issues_text(filtered, limit=80, full=False)
+        )
 
     async def summary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not settings.openai_api_key:
-            await _send_long(update, "Не задан OPENAI_API_KEY. Добавь в .env и перезапусти бота.")
+            await _send_long(
+                update, "Не задан OPENAI_API_KEY. Добавь в .env и перезапусти бота."
+            )
             return
 
         report = run_xlsx_audit(
@@ -269,7 +331,9 @@ def build_application(settings: Settings) -> Application:
             await _send_long(update, "Выбери PM для /summary:", reply_markup=kb)
             return
 
-        filtered = _filter_issues_by_pm(all_issues, pm_query) if pm_query else all_issues
+        filtered = (
+            _filter_issues_by_pm(all_issues, pm_query) if pm_query else all_issues
+        )
         if pm_query and not filtered:
             pms = _extract_pm_list(all_issues)
             hint = ", ".join(pms[:15]) if pms else "(нет PM в данных)"
@@ -289,19 +353,27 @@ def build_application(settings: Settings) -> Application:
         prompt = build_summary_prompt(pm_filter=pm_query or None)
 
         def _call_llm_sync() -> str:
-            client = Gpt5Client(Gpt5Config(api_key=settings.openai_api_key, model=settings.openai_model))
-            return client.summarize(system=SYSTEM_PROMPT, prompt=prompt, context=llm_context)
+            client = Gpt5Client(
+                Gpt5Config(api_key=settings.openai_api_key, model=settings.openai_model)
+            )
+            return client.summarize(
+                system=SYSTEM_PROMPT, prompt=prompt, context=llm_context
+            )
 
         await _send_long(update, "Готовлю summary через GPT‑5…")
         try:
             text = await asyncio.to_thread(_call_llm_sync)
         except Exception as e:  # noqa: BLE001
-            await _send_long(update, f"Ошибка при вызове GPT‑5: {type(e).__name__}: {e}")
+            await _send_long(
+                update, f"Ошибка при вызове GPT‑5: {type(e).__name__}: {e}"
+            )
             return
 
         await _send_long(update, text or "GPT‑5 вернул пустой ответ.")
 
-    async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def callback_handler(
+        update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         if not update.callback_query:
             return
 
@@ -340,18 +412,25 @@ def build_application(settings: Settings) -> Application:
                 return
             pm_query = pms[idx]
 
-        filtered = _filter_issues_by_pm(all_issues, pm_query) if pm_query else all_issues
+        filtered = (
+            _filter_issues_by_pm(all_issues, pm_query) if pm_query else all_issues
+        )
         _store_issues(context, chat_id, filtered)
         _store_audit_context(context, chat_id, _build_llm_context(filtered))
 
         if action == "auditpm":
             title = f"Аудит (PM: {pm_query})" if pm_query else "Аудит (все PM)"
-            await _send_long(update, title + "\n\n" + format_issues_text(filtered, limit=80, full=False))
+            await _send_long(
+                update,
+                title + "\n\n" + format_issues_text(filtered, limit=80, full=False),
+            )
             return
 
         # summarypm
         if not settings.openai_api_key:
-            await _send_long(update, "Не задан OPENAI_API_KEY. Добавь в .env и перезапусти бота.")
+            await _send_long(
+                update, "Не задан OPENAI_API_KEY. Добавь в .env и перезапусти бота."
+            )
             return
 
         llm_context = _build_llm_context(filtered)
@@ -360,14 +439,20 @@ def build_application(settings: Settings) -> Application:
         prompt = build_summary_prompt(pm_filter=pm_query or None)
 
         def _call_llm_sync() -> str:
-            client = Gpt5Client(Gpt5Config(api_key=settings.openai_api_key, model=settings.openai_model))
-            return client.summarize(system=SYSTEM_PROMPT, prompt=prompt, context=llm_context)
+            client = Gpt5Client(
+                Gpt5Config(api_key=settings.openai_api_key, model=settings.openai_model)
+            )
+            return client.summarize(
+                system=SYSTEM_PROMPT, prompt=prompt, context=llm_context
+            )
 
         await _send_long(update, "Готовлю summary через GPT‑5…")
         try:
             text = await asyncio.to_thread(_call_llm_sync)
         except Exception as e:  # noqa: BLE001
-            await _send_long(update, f"Ошибка при вызове GPT‑5: {type(e).__name__}: {e}")
+            await _send_long(
+                update, f"Ошибка при вызове GPT‑5: {type(e).__name__}: {e}"
+            )
             return
         await _send_long(update, text or "GPT‑5 вернул пустой ответ.")
 
@@ -414,12 +499,26 @@ def build_application(settings: Settings) -> Application:
         q = question.lower()
         issues_all = await _ensure_cache()
         pm_filter = _resolve_pm_from_text(issues_all, question)
-        issues_filtered = _filter_issues_by_pm(issues_all, pm_filter) if pm_filter else issues_all
+        issues_filtered = (
+            _filter_issues_by_pm(issues_all, pm_filter) if pm_filter else issues_all
+        )
 
         # Intent routing (simple, deterministic):
         wants_refresh = any(k in q for k in ["обнов", "refresh", "перечитай", "reload"])
-        wants_audit = any(k in q for k in ["аудит", "проверь", "провер", "ошибк", "audit"])
-        wants_summary = any(k in q for k in ["summary", "саммари", "план", "что делать", "приоритет", "рекомендац"])
+        wants_audit = any(
+            k in q for k in ["аудит", "проверь", "провер", "ошибк", "audit"]
+        )
+        wants_summary = any(
+            k in q
+            for k in [
+                "summary",
+                "саммари",
+                "план",
+                "что делать",
+                "приоритет",
+                "рекомендац",
+            ]
+        )
 
         if wants_refresh:
             report = run_xlsx_audit(
@@ -430,31 +529,56 @@ def build_application(settings: Settings) -> Application:
             issues_new = list(report.issues)
             _store_issues(context, chat_id, issues_new)
             _store_audit_context(context, chat_id, _build_llm_context(issues_new))
-            await _send_long(update, "Ок, обновил данные. Напиши: 'покажи ошибки' или 'summary'.")
+            await _send_long(
+                update, "Ок, обновил данные. Напиши: 'покажи ошибки' или 'summary'."
+            )
             return
 
-        wants_fix_preview = any(k in q for k in ["подготовь прав", "preview прав", "предложи прав", "fix preview"])
+        wants_fix_preview = any(
+            k in q
+            for k in ["подготовь прав", "preview прав", "предложи прав", "fix preview"]
+        )
         wants_fix_apply = any(k in q for k in ["примен", "apply прав", "fix apply"])
 
         if wants_fix_preview:
-            plan = plan_fill_empty_months_with_zero(
-                sheet_values=read_xlsx_as_sheet_values(
-                    path=settings.local_xlsx_path,
-                    sheet_name=settings.local_xlsx_sheet or None,
-                ),
-                sheet_name=settings.local_xlsx_sheet or "(first)",
+            sheet_values = read_xlsx_as_sheet_values(
+                path=settings.local_xlsx_path,
+                sheet_name=settings.local_xlsx_sheet or None,
+            )
+            sheet_name = settings.local_xlsx_sheet or "(first)"
+
+            plan_zero = plan_fill_empty_months_with_zero(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
                 months_ahead=2,
+                pm_filter=pm_filter or None,
+            )
+            plan_highlight = plan_highlight_missing_pm_and_employee(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
                 pm_filter=pm_filter or None,
             )
             _store_fixplan(
                 context,
                 chat_id,
-                {"pm": pm_filter or "", "count": len(plan.updates)},
+                {
+                    "pm": pm_filter or "",
+                    "zero_count": len(plan_zero.updates),
+                    "highlight_count": len(plan_highlight.updates),
+                },
             )
+            examples_zero = _preview_examples(plan_zero.updates, limit=10)
+            examples_hl = _preview_examples(plan_highlight.updates, limit=10)
             await _send_long(
                 update,
-                f"Подготовил правки: {len(plan.updates)} ячеек -> 0.\n"
-                "Чтобы применить: напиши «Применить правки» или /fix apply.\n"
+                "Preview правок (ничего не меняю, только показываю):\n"
+                f"- заполнить 0: {len(plan_zero.updates)} ячеек\n"
+                f"- подсветить пустые PM/сотрудника: {len(plan_highlight.updates)} ячеек\n\n"
+                "Примеры (топ‑10):\n"
+                + (examples_zero if examples_zero else "- (нет)\n")
+                + ("\n" if examples_hl else "")
+                + (("\nПодсветка (топ‑10):\n" + examples_hl) if examples_hl else "")
+                + "\n\nЧтобы применить: «Применить правки» или /fix apply.\n"
                 "Файл будет сохранен как копия (оригинал не трогаю).",
             )
             return
@@ -462,24 +586,45 @@ def build_application(settings: Settings) -> Application:
         if wants_fix_apply:
             plan_meta = _get_fixplan(context, chat_id)
             if not plan_meta:
-                await _send_long(update, "Сначала сделай preview: «Подготовь правки» или /fix preview.")
+                await _send_long(
+                    update,
+                    "Сначала сделай preview: «Подготовь правки» или /fix preview.",
+                )
                 return
-            # recompute plan to avoid stale indices / after refresh
-            plan = plan_fill_empty_months_with_zero(
-                sheet_values=read_xlsx_as_sheet_values(
-                    path=settings.local_xlsx_path,
-                    sheet_name=settings.local_xlsx_sheet or None,
-                ),
-                sheet_name=settings.local_xlsx_sheet or "(first)",
-                months_ahead=2,
-                pm_filter=(plan_meta.get("pm") or "").strip() or None,
+            sheet_values = read_xlsx_as_sheet_values(
+                path=settings.local_xlsx_path,
+                sheet_name=settings.local_xlsx_sheet or None,
             )
-            if not plan.updates:
-                await _send_long(update, "Нет правок для применения (0 ячеек).")
+            sheet_name = settings.local_xlsx_sheet or "(first)"
+            pm = (plan_meta.get("pm") or "").strip() or None
+
+            plan_zero = plan_fill_empty_months_with_zero(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+                months_ahead=2,
+                pm_filter=pm,
+            )
+            plan_highlight = plan_highlight_missing_pm_and_employee(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+                pm_filter=pm,
+            )
+
+            combined_updates = [*plan_zero.updates, *plan_highlight.updates]
+            if not combined_updates:
+                await _send_long(update, "Нет правок для применения (0 действий).")
                 return
+
+            from ..fixes.models import FixPlan
+
+            plan = FixPlan(
+                sheet_name=sheet_name,
+                description="combined",
+                updates=combined_updates,
+            )
             out_dir = Path(settings.local_xlsx_output_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir / "resource_plan.fixed.xlsx"
+            out_path = out_dir / f"resource_plan.fixed.{_timestamp_slug()}.xlsx"
             res = apply_fix_plan_to_xlsx_copy(
                 input_path=settings.local_xlsx_path,
                 plan=plan,
@@ -487,7 +632,10 @@ def build_application(settings: Settings) -> Application:
             )
             await _send_long(
                 update,
-                f"Готово. Применено правок: {res.applied_count}.\n"
+                "Готово.\n"
+                f"- заполнить 0: {len(plan_zero.updates)}\n"
+                f"- подсветка: {len(plan_highlight.updates)}\n"
+                f"Всего действий: {res.applied_count}\n"
                 f"Сохранено в: {res.output_path}",
             )
             return
@@ -496,7 +644,9 @@ def build_application(settings: Settings) -> Application:
             title = f"Аудит (PM: {pm_filter})" if pm_filter else "Аудит (все PM)"
             await _send_long(
                 update,
-                title + "\n\n" + format_issues_text(issues_filtered, limit=80, full=False),
+                title
+                + "\n\n"
+                + format_issues_text(issues_filtered, limit=80, full=False),
             )
             return
 
@@ -514,14 +664,22 @@ def build_application(settings: Settings) -> Application:
             prompt = build_summary_prompt(pm_filter=pm_filter or None)
 
             def _call_llm_sync() -> str:
-                client = Gpt5Client(Gpt5Config(api_key=settings.openai_api_key, model=settings.openai_model))
-                return client.summarize(system=SYSTEM_PROMPT, prompt=prompt, context=llm_context)
+                client = Gpt5Client(
+                    Gpt5Config(
+                        api_key=settings.openai_api_key, model=settings.openai_model
+                    )
+                )
+                return client.summarize(
+                    system=SYSTEM_PROMPT, prompt=prompt, context=llm_context
+                )
 
             await _send_long(update, "Готовлю summary через GPT‑5…")
             try:
                 text = await asyncio.to_thread(_call_llm_sync)
             except Exception as e:  # noqa: BLE001
-                await _send_long(update, f"Ошибка при вызове GPT‑5: {type(e).__name__}: {e}")
+                await _send_long(
+                    update, f"Ошибка при вызове GPT‑5: {type(e).__name__}: {e}"
+                )
                 return
             await _send_long(update, text or "GPT‑5 вернул пустой ответ.")
             return
@@ -543,16 +701,25 @@ def build_application(settings: Settings) -> Application:
         prompt = build_chat_prompt(user_message=question)
 
         def _call_llm_sync() -> str:
-            client = Gpt5Client(Gpt5Config(api_key=settings.openai_api_key, model=settings.openai_model))
-            return client.summarize(system=SYSTEM_PROMPT, prompt=prompt, context=audit_ctx)
+            client = Gpt5Client(
+                Gpt5Config(api_key=settings.openai_api_key, model=settings.openai_model)
+            )
+            return client.summarize(
+                system=SYSTEM_PROMPT, prompt=prompt, context=audit_ctx
+            )
 
         try:
             text = await asyncio.to_thread(_call_llm_sync)
         except Exception as e:  # noqa: BLE001
-            await _send_long(update, f"Ошибка при вызове GPT‑5: {type(e).__name__}: {e}")
+            await _send_long(
+                update, f"Ошибка при вызове GPT‑5: {type(e).__name__}: {e}"
+            )
             return
 
-        await _send_long(update, text or "Не смог сформировать ответ. Попробуй переформулировать вопрос.")
+        await _send_long(
+            update,
+            text or "Не смог сформировать ответ. Попробуй переформулировать вопрос.",
+        )
 
     async def fix_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg = _message_from_update(update)
@@ -569,20 +736,43 @@ def build_application(settings: Settings) -> Application:
         pm_query = " ".join(args[1:]).strip()
 
         if sub == "preview":
-            plan = plan_fill_empty_months_with_zero(
-                sheet_values=read_xlsx_as_sheet_values(
-                    path=settings.local_xlsx_path,
-                    sheet_name=settings.local_xlsx_sheet or None,
-                ),
-                sheet_name=settings.local_xlsx_sheet or "(first)",
+            sheet_values = read_xlsx_as_sheet_values(
+                path=settings.local_xlsx_path,
+                sheet_name=settings.local_xlsx_sheet or None,
+            )
+            sheet_name = settings.local_xlsx_sheet or "(first)"
+            plan_zero = plan_fill_empty_months_with_zero(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
                 months_ahead=2,
                 pm_filter=pm_query or None,
             )
-            _store_fixplan(context, chat_id, {"pm": pm_query, "count": len(plan.updates)})
+            plan_highlight = plan_highlight_missing_pm_and_employee(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+                pm_filter=pm_query or None,
+            )
+            _store_fixplan(
+                context,
+                chat_id,
+                {
+                    "pm": pm_query,
+                    "zero_count": len(plan_zero.updates),
+                    "highlight_count": len(plan_highlight.updates),
+                },
+            )
+            examples_zero = _preview_examples(plan_zero.updates, limit=10)
+            examples_hl = _preview_examples(plan_highlight.updates, limit=10)
             await _send_long(
                 update,
-                f"Preview правок: {len(plan.updates)} ячеек -> 0.\n"
-                "Чтобы применить: /fix apply\n"
+                "Preview правок (ничего не меняю, только показываю):\n"
+                f"- заполнить 0: {len(plan_zero.updates)} ячеек\n"
+                f"- подсветить пустые PM/сотрудника: {len(plan_highlight.updates)} ячеек\n\n"
+                "Примеры (топ‑10):\n"
+                + (examples_zero if examples_zero else "- (нет)\n")
+                + ("\n" if examples_hl else "")
+                + (("\nПодсветка (топ‑10):\n" + examples_hl) if examples_hl else "")
+                + "\n\nЧтобы применить: /fix apply\n"
                 "Файл будет сохранен как копия (оригинал не трогаю).",
             )
             return
@@ -593,22 +783,38 @@ def build_application(settings: Settings) -> Application:
                 await _send_long(update, "Сначала сделай /fix preview (можно с PM).")
                 return
 
-            plan = plan_fill_empty_months_with_zero(
-                sheet_values=read_xlsx_as_sheet_values(
-                    path=settings.local_xlsx_path,
-                    sheet_name=settings.local_xlsx_sheet or None,
-                ),
-                sheet_name=settings.local_xlsx_sheet or "(first)",
-                months_ahead=2,
-                pm_filter=(plan_meta.get("pm") or "").strip() or None,
+            sheet_values = read_xlsx_as_sheet_values(
+                path=settings.local_xlsx_path,
+                sheet_name=settings.local_xlsx_sheet or None,
             )
-            if not plan.updates:
-                await _send_long(update, "Нет правок для применения (0 ячеек).")
+            sheet_name = settings.local_xlsx_sheet or "(first)"
+            pm = (plan_meta.get("pm") or "").strip() or None
+
+            plan_zero = plan_fill_empty_months_with_zero(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+                months_ahead=2,
+                pm_filter=pm,
+            )
+            plan_highlight = plan_highlight_missing_pm_and_employee(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+                pm_filter=pm,
+            )
+            combined_updates = [*plan_zero.updates, *plan_highlight.updates]
+            if not combined_updates:
+                await _send_long(update, "Нет правок для применения (0 действий).")
                 return
+
+            from ..fixes.models import FixPlan
+
+            plan = FixPlan(
+                sheet_name=sheet_name, description="combined", updates=combined_updates
+            )
 
             out_dir = Path(settings.local_xlsx_output_dir)
             out_dir.mkdir(parents=True, exist_ok=True)
-            out_path = out_dir / "resource_plan.fixed.xlsx"
+            out_path = out_dir / f"resource_plan.fixed.{_timestamp_slug()}.xlsx"
             res = apply_fix_plan_to_xlsx_copy(
                 input_path=settings.local_xlsx_path,
                 plan=plan,
@@ -616,12 +822,17 @@ def build_application(settings: Settings) -> Application:
             )
             await _send_long(
                 update,
-                f"Готово. Применено правок: {res.applied_count}.\n"
+                "Готово.\n"
+                f"- заполнить 0: {len(plan_zero.updates)}\n"
+                f"- подсветка: {len(plan_highlight.updates)}\n"
+                f"Всего действий: {res.applied_count}\n"
                 f"Сохранено в: {res.output_path}",
             )
             return
 
-        await _send_long(update, "Неизвестная команда. Используй: /fix preview [PM] или /fix apply")
+        await _send_long(
+            update, "Неизвестная команда. Используй: /fix preview [PM] или /fix apply"
+        )
 
     async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await chat_text(update, context)

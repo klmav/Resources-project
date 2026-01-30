@@ -6,6 +6,7 @@ from typing import Optional
 from ..checks.resource_plan_xlsx import (
     _active_month_cols,  # noqa: SLF001 - internal reuse within our codebase
     _find_header,  # noqa: SLF001
+    _format_month_label,  # noqa: SLF001
     _forward_month_cols,  # noqa: SLF001
     _is_empty,  # noqa: SLF001
     _is_true,  # noqa: SLF001
@@ -40,7 +41,9 @@ def plan_fill_empty_months_with_zero(
         months_ahead=months_ahead,
     )
     if not target_month_cols:
-        return FixPlan(sheet_name=sheet_name, description="no target months", updates=[])
+        return FixPlan(
+            sheet_name=sheet_name, description="no target months", updates=[]
+        )
 
     active_year_cols = _active_month_cols(parsed, header)
 
@@ -74,7 +77,9 @@ def plan_fill_empty_months_with_zero(
                     CellUpdate(
                         sheet_name=sheet_name,
                         cell=CellRef(row=r_idx + 1, col=c_idx + 1),
+                        kind="set_value",
                         new_value=0,
+                        month_label=_format_month_label(header[c_idx]),
                         reason=f"Fill empty month with 0 (horizon {months_ahead} months).",
                         pm=pm or None,
                         person=employee or None,
@@ -104,4 +109,3 @@ def plan_fill_empty_months_with_zero_from_xlsx(
         today=today,
         pm_filter=pm_filter,
     )
-
