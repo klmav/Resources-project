@@ -21,6 +21,11 @@ class Settings:
     # Audit behavior
     stale_days: int = 3
 
+    # Scheduled reports
+    weekly_report_enabled: str = ""
+    weekly_report_time: str = "10:00"  # HH:MM
+    weekly_report_tz: str = "Europe/Moscow"
+
     # Local XLSX mode (for bot / local runs)
     local_xlsx_path: str = "auto"
     local_xlsx_sheet: str = ""
@@ -66,6 +71,9 @@ def get_settings() -> Settings:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         stale_days=_get_int("STALE_DAYS", 3),
+        weekly_report_enabled=os.getenv("WEEKLY_REPORT_ENABLED", ""),
+        weekly_report_time=os.getenv("WEEKLY_REPORT_TIME", "10:00"),
+        weekly_report_tz=os.getenv("WEEKLY_REPORT_TZ", "Europe/Moscow"),
         local_xlsx_path=os.getenv("LOCAL_XLSX_PATH", "auto"),
         local_xlsx_sheet=os.getenv("LOCAL_XLSX_SHEET", ""),
         local_xlsx_output_dir=os.getenv("LOCAL_XLSX_OUTPUT_DIR", "out"),
