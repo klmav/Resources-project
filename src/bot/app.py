@@ -22,9 +22,19 @@ from ..llm.prompts import SYSTEM_PROMPT, build_chat_prompt, build_summary_prompt
 from ..main import format_issues_text
 from ..models import Issue
 from ..services.audit_xlsx import run_xlsx_audit
+from ..services.issue_history import find_persistent_red_issues, update_history_file
+from ..services.issue_delta import build_snapshot, compute_delta, load_snapshot, save_snapshot
 from ..services.load import compute_person_month_load
 from ..fixes.month_empty_to_zero import plan_fill_empty_months_with_zero
 from ..fixes.highlight_missing_fields import plan_highlight_missing_pm_and_employee
+from ..fixes.highlight_invalid_month_cells import plan_highlight_invalid_month_cells
+from ..fixes.highlight_workdays_row import plan_highlight_invalid_workdays_row
+from ..fixes.highlight_row_meta_issues import (
+    plan_highlight_in_flag_inconsistent,
+    plan_highlight_missing_key_fields,
+    plan_highlight_role_code_invalid,
+)
+from ..fixes.merge_updates import merge_updates
 from ..fixes.xlsx_apply import apply_fix_plan_to_xlsx_copy
 from ..local.xlsx_reader import read_xlsx_as_sheet_values
 
@@ -252,9 +262,126 @@ def build_application(settings: Settings) -> Application:
             sheet=settings.local_xlsx_sheet or None,
         )
         issues = list(report.issues)
+
+        # Persistent issues ("not fixed N days")
+        tz = None
+        try:
+            tz = ZoneInfo(settings.weekly_report_tz or "Europe/Moscow")
+        except Exception:
+            tz = None
+        now_date = dt.datetime.now(tz).date() if tz else dt.date.today()
+        history_path = (
+            Path(settings.issue_history_path)
+            if settings.issue_history_path
+            else Path(settings.local_xlsx_output_dir) / "issue_history.json"
+        )
+        history = update_history_file(path=history_path, issues=issues, now=now_date)
+        persistent = find_persistent_red_issues(
+            issues=issues,
+            history=history,
+            now=now_date,
+            min_days=int(settings.persistent_red_days),
+        )
+        def _loc_text(*, pm: str | None, person: str | None, week: str | None) -> str:
+            loc = []
+            if person:
+                loc.append(f"person={person}")
+            if pm:
+                loc.append(f"pm={pm}")
+            if week:
+                loc.append(f"week={week}")
+            return f" [{' '.join(loc)}]" if loc else ""
+
+        sticky = ""
+        if persistent:
+            lines: list[str] = []
+            lines.append(
+                f"⚠️ Критичные держатся ≥ {int(settings.persistent_red_days)} дней: {len(persistent)}"
+            )
+            for p in persistent[:5]:
+                lines.append(
+                    f"- {p.issue.code}{_loc_text(pm=p.issue.location.pm, person=p.issue.location.person, week=p.issue.location.week)}: {p.age_days} дн."
+                )
+            sticky = "\n".join(lines) + "\n\n"
+
+        # Delta since previous weekly report
+        snapshot_path = history_path.with_name("issue_snapshot.json")
+        prev_snap = load_snapshot(snapshot_path)
+        delta = compute_delta(prev=prev_snap, current_issues=issues)
+        delta_txt = ""
+        if delta.prev_date is not None:
+            new_red = [x for x in delta.new if x.issue and x.issue.severity == Severity.red]
+            fixed_red = [x for x in delta.resolved if x.prev and x.prev.severity == "red"]
+
+            lines: list[str] = []
+            lines.append(
+                "Δ "
+                f"с {delta.prev_date.isoformat()}: "
+                f"новое {len(delta.new)} (red {len(new_red)}), "
+                f"исправлено {len(delta.resolved)} (red {len(fixed_red)}), "
+                f"ухудшилось {len(delta.worsened)}, улучшилось {len(delta.improved)}"
+            )
+
+            if new_red:
+                lines.append("")
+                lines.append("🔴 Новые критичные (top‑3):")
+                for x in new_red[:3]:
+                    it = x.issue
+                    if it:
+                        lines.append(
+                            f"- {it.code}{_loc_text(pm=it.location.pm, person=it.location.person, week=it.location.week)}"
+                        )
+
+            if fixed_red:
+                lines.append("")
+                lines.append("✅ Исправленные критичные (top‑3):")
+                for x in fixed_red[:3]:
+                    prev = x.prev
+                    if prev:
+                        lines.append(
+                            f"- {prev.code}{_loc_text(pm=prev.pm, person=prev.person, week=prev.week)}"
+                        )
+
+            delta_txt = "\n".join(lines) + "\n\n"
+        else:
+            delta_txt = "Δ Это первый недельный отчёт: дельту пока не считаю.\n\n"
+
+        # Save current snapshot for next week
+        save_snapshot(snapshot_path, build_snapshot(issues=issues, now=now_date))
+
+        # Short weekly body
+        red = [i for i in issues if i.severity == Severity.red]
+        yellow = [i for i in issues if i.severity == Severity.yellow]
+        info = [i for i in issues if i.severity == Severity.info]
+
+        by_code: dict[str, int] = {}
+        for i in issues:
+            by_code[i.code] = by_code.get(i.code, 0) + 1
+        top_codes = sorted(by_code.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+
+        body_lines: list[str] = []
+        body_lines.append(
+            f"Итого проблем: {len(issues)} (red={len(red)}, yellow={len(yellow)}, info={len(info)})"
+        )
+        if top_codes:
+            body_lines.append("Топ‑5 по типу: " + ", ".join([f"{c}={n}" for c, n in top_codes]))
+
+        # show a few critical examples (avoid MONTH_CELL_EMPTY spam)
+        examples = [i for i in red if i.code != "MONTH_CELL_EMPTY"] + [
+            i for i in red if i.code == "MONTH_CELL_EMPTY"
+        ]
+        if examples:
+            body_lines.append("")
+            body_lines.append("Примеры критичных (до 8):")
+            for it in examples[:8]:
+                body_lines.append(
+                    f"- {it.code}{_loc_text(pm=it.location.pm, person=it.location.person, week=it.location.week)}"
+                )
+
         header = "Еженедельный отчет: аудит ресурсного плана (3‑й рабочий день недели)\n"
-        body = format_issues_text(issues, limit=80, full=False)
-        await _send_long_to_chat(settings.telegram_chat_id, header + "\n" + body)
+        await _send_long_to_chat(
+            settings.telegram_chat_id, header + "\n" + delta_txt + sticky + "\n".join(body_lines)
+        )
 
     def _maybe_schedule_weekly_report() -> None:
         enabled = str(settings.weekly_report_enabled).strip().lower() in {
@@ -297,7 +424,7 @@ def build_application(settings: Settings) -> Application:
             if u.kind == "set_value":
                 lines.append(f"- {a1}{month_txt}: {person} / {pm} → 0")
             elif u.kind == "highlight":
-                lines.append(f"- {a1}: подсветить ({u.reason}) {person} / {pm}")
+                lines.append(f"- {a1}{month_txt}: подсветить ({u.reason}) {person} / {pm}")
         return "\n".join(lines)
 
     def _pm_keyboard(
@@ -370,6 +497,22 @@ def build_application(settings: Settings) -> Application:
             sheet=settings.local_xlsx_sheet or None,
         )
         all_issues = list(report.issues)
+
+        # Update persistent history on manual audit too (useful even without scheduler)
+        history_path = (
+            Path(settings.issue_history_path)
+            if settings.issue_history_path
+            else Path(settings.local_xlsx_output_dir) / "issue_history.json"
+        )
+        now_date = dt.date.today()
+        history = update_history_file(path=history_path, issues=all_issues, now=now_date)
+        persistent = find_persistent_red_issues(
+            issues=all_issues,
+            history=history,
+            now=now_date,
+            min_days=int(settings.persistent_red_days),
+        )
+
         pm_query = " ".join(getattr(context, "args", []) or []).strip()
 
         msg = _message_from_update(update)
@@ -397,8 +540,16 @@ def build_application(settings: Settings) -> Application:
             _store_audit_context(context, msg.chat.id, _build_llm_context(filtered))
 
         title = f"Аудит (PM: {pm_query})" if pm_query else "Аудит (все PM)"
+        sticky = ""
+        if persistent:
+            # show compact count (avoid huge spam); details are in weekly report
+            sticky = (
+                f"⚠️ Критичные проблемы держатся ≥ {int(settings.persistent_red_days)} дней: "
+                f"{len(persistent)}\n\n"
+            )
         await _send_long(
-            update, title + "\n\n" + format_issues_text(filtered, limit=80, full=False)
+            update,
+            title + "\n\n" + sticky + format_issues_text(filtered, limit=80, full=False),
         )
 
     async def person_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1037,6 +1188,10 @@ def build_application(settings: Settings) -> Application:
                 sheet_name=settings.local_xlsx_sheet or None,
             )
             sheet_name = settings.local_xlsx_sheet or "(first)"
+            plan_workdays = plan_highlight_invalid_workdays_row(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+            )
             plan_zero = plan_fill_empty_months_with_zero(
                 sheet_values=sheet_values,
                 sheet_name=sheet_name,
@@ -1048,26 +1203,86 @@ def build_application(settings: Settings) -> Application:
                 sheet_name=sheet_name,
                 pm_filter=pm_query or None,
             )
+            plan_invalid = plan_highlight_invalid_month_cells(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+                pm_filter=pm_query or None,
+            )
+            plan_role = plan_highlight_role_code_invalid(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+                pm_filter=pm_query or None,
+            )
+            plan_inflag = plan_highlight_in_flag_inconsistent(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+                pm_filter=pm_query or None,
+            )
+            plan_keyfields = plan_highlight_missing_key_fields(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+                pm_filter=pm_query or None,
+            )
             _store_fixplan(
                 context,
                 chat_id,
                 {
                     "pm": pm_query,
+                    "workdays_count": len(plan_workdays.updates),
                     "zero_count": len(plan_zero.updates),
                     "highlight_count": len(plan_highlight.updates),
+                    "invalid_count": len(plan_invalid.updates),
+                    "role_count": len(plan_role.updates),
+                    "inflag_count": len(plan_inflag.updates),
+                    "keyfields_count": len(plan_keyfields.updates),
                 },
             )
+            examples_workdays = _preview_examples(plan_workdays.updates, limit=10)
             examples_zero = _preview_examples(plan_zero.updates, limit=10)
             examples_hl = _preview_examples(plan_highlight.updates, limit=10)
+            examples_invalid = _preview_examples(plan_invalid.updates, limit=10)
+            examples_role = _preview_examples(plan_role.updates, limit=10)
+            examples_inflag = _preview_examples(plan_inflag.updates, limit=10)
+            examples_keyfields = _preview_examples(plan_keyfields.updates, limit=10)
             await _send_long(
                 update,
                 "Preview правок (ничего не меняю, только показываю):\n"
+                f"- подсветить сервисную строку (рабочие дни): {len(plan_workdays.updates)} ячеек\n"
                 f"- заполнить 0: {len(plan_zero.updates)} ячеек\n"
                 f"- подсветить пустые PM/сотрудника: {len(plan_highlight.updates)} ячеек\n\n"
+                f"- подсветить некорректные значения месяцев: {len(plan_invalid.updates)} ячеек\n\n"
+                f"- подсветить некорректные роли: {len(plan_role.updates)} ячеек\n"
+                f"- подсветить 'in?' (есть дни, но False): {len(plan_inflag.updates)} ячеек\n"
+                f"- подсветить пустые ключевые поля строки: {len(plan_keyfields.updates)} ячеек\n\n"
                 "Примеры (топ‑10):\n"
+                + (examples_workdays if examples_workdays else "- (нет)\n")
                 + (examples_zero if examples_zero else "- (нет)\n")
                 + ("\n" if examples_hl else "")
                 + (("\nПодсветка (топ‑10):\n" + examples_hl) if examples_hl else "")
+                + ("\n" if examples_invalid else "")
+                + (
+                    ("\nПодсветка значений месяцев (топ‑10):\n" + examples_invalid)
+                    if examples_invalid
+                    else ""
+                )
+                + ("\n" if examples_role else "")
+                + (
+                    ("\nПодсветка ролей (топ‑10):\n" + examples_role)
+                    if examples_role
+                    else ""
+                )
+                + ("\n" if examples_inflag else "")
+                + (
+                    ("\nПодсветка in? (топ‑10):\n" + examples_inflag)
+                    if examples_inflag
+                    else ""
+                )
+                + ("\n" if examples_keyfields else "")
+                + (
+                    ("\nПодсветка ключевых полей (топ‑10):\n" + examples_keyfields)
+                    if examples_keyfields
+                    else ""
+                )
                 + "\n\nЧтобы применить: /fix apply\n"
                 "Файл будет сохранен как копия (оригинал не трогаю).",
             )
@@ -1086,6 +1301,10 @@ def build_application(settings: Settings) -> Application:
             sheet_name = settings.local_xlsx_sheet or "(first)"
             pm = (plan_meta.get("pm") or "").strip() or None
 
+            plan_workdays = plan_highlight_invalid_workdays_row(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+            )
             plan_zero = plan_fill_empty_months_with_zero(
                 sheet_values=sheet_values,
                 sheet_name=sheet_name,
@@ -1097,7 +1316,38 @@ def build_application(settings: Settings) -> Application:
                 sheet_name=sheet_name,
                 pm_filter=pm,
             )
-            combined_updates = [*plan_zero.updates, *plan_highlight.updates]
+            plan_invalid = plan_highlight_invalid_month_cells(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+                pm_filter=pm,
+            )
+            plan_role = plan_highlight_role_code_invalid(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+                pm_filter=pm,
+            )
+            plan_inflag = plan_highlight_in_flag_inconsistent(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+                pm_filter=pm,
+            )
+            plan_keyfields = plan_highlight_missing_key_fields(
+                sheet_values=sheet_values,
+                sheet_name=sheet_name,
+                pm_filter=pm,
+            )
+
+            combined_updates = merge_updates(
+                [
+                    *plan_workdays.updates,
+                    *plan_zero.updates,
+                    *plan_highlight.updates,
+                    *plan_invalid.updates,
+                    *plan_role.updates,
+                    *plan_inflag.updates,
+                    *plan_keyfields.updates,
+                ]
+            )
             if not combined_updates:
                 await _send_long(update, "Нет правок для применения (0 действий).")
                 return
@@ -1119,8 +1369,13 @@ def build_application(settings: Settings) -> Application:
             await _send_long(
                 update,
                 "Готово.\n"
+                f"- подсветка рабочих дней: {len(plan_workdays.updates)}\n"
                 f"- заполнить 0: {len(plan_zero.updates)}\n"
                 f"- подсветка: {len(plan_highlight.updates)}\n"
+                f"- подсветка значений месяцев: {len(plan_invalid.updates)}\n"
+                f"- подсветка ролей: {len(plan_role.updates)}\n"
+                f"- подсветка in?: {len(plan_inflag.updates)}\n"
+                f"- подсветка ключевых полей: {len(plan_keyfields.updates)}\n"
                 f"Всего действий: {res.applied_count}\n"
                 f"Сохранено в: {res.output_path}",
             )
